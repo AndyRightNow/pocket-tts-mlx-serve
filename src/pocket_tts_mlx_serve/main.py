@@ -124,13 +124,28 @@ def _submit_job(
     voice_value: str,
     max_tokens: int,
     frames_after_eos: int | None,
+    trim_start_ms: int,
+    fade_in_ms: int,
+    warmup_frames: int,
 ) -> Any:
     """Submit a generation job and return a generator over the WAV bytes."""
     if _task_queue is None:
         raise HTTPException(status_code=503, detail="TTS model is not loaded")
 
     response_queue: Queue = Queue()
-    _task_queue.put((response_queue, text, voice_kind, voice_value, max_tokens, frames_after_eos))
+    _task_queue.put(
+        (
+            response_queue,
+            text,
+            voice_kind,
+            voice_value,
+            max_tokens,
+            frames_after_eos,
+            trim_start_ms,
+            fade_in_ms,
+            warmup_frames,
+        )
+    )
     return _iter_response_queue(response_queue)
 
 
@@ -162,6 +177,9 @@ def text_to_speech(
     voice_wav: Annotated[UploadFile | None, File()] = None,
     max_tokens: Annotated[int, Form()] = 50,
     frames_after_eos: Annotated[int | None, Form()] = None,
+    trim_start_ms: Annotated[int, Form()] = 0,
+    fade_in_ms: Annotated[int, Form()] = 0,
+    warmup_frames: Annotated[int, Form()] = 1,
 ) -> StreamingResponse:
     """
     Generate speech from text.
@@ -171,6 +189,11 @@ def text_to_speech(
         voice_url: Remote URL starting with ``http://``, ``https://``, or ``hf://``,
             or a path to a ``.safetensors`` voice embedding.
         voice_wav: Optional uploaded voice file (mutually exclusive with ``voice_url``).
+        max_tokens: Max tokens per chunk.
+        frames_after_eos: Frames to generate after end-of-sentence.
+        trim_start_ms: Milliseconds to trim from the start of generated audio.
+        fade_in_ms: Linear fade-in duration in milliseconds.
+        warmup_frames: Number of initial Mimi frames to decode and discard.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
@@ -192,7 +215,16 @@ def text_to_speech(
                 status_code=400,
                 detail="voice_url must be a remote URL or a .safetensors path",
             )
-        iterator = _submit_job(text, "url", voice_url, max_tokens, frames_after_eos)
+        iterator = _submit_job(
+            text,
+            "url",
+            voice_url,
+            max_tokens,
+            frames_after_eos,
+            trim_start_ms,
+            fade_in_ms,
+            warmup_frames,
+        )
         return _start_streaming_response(iterator)
 
     # voice_wav path
@@ -204,7 +236,16 @@ def text_to_speech(
         temp_path = temp_file.name
 
     def _stream_file_response() -> Any:
-        iterator = _submit_job(text, "file", temp_path, max_tokens, frames_after_eos)
+        iterator = _submit_job(
+            text,
+            "file",
+            temp_path,
+            max_tokens,
+            frames_after_eos,
+            trim_start_ms,
+            fade_in_ms,
+            warmup_frames,
+        )
         try:
             yield from iterator
         finally:

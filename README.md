@@ -68,6 +68,9 @@ Generate speech from text. The response is a streaming `audio/wav` file.
 | `voice_wav` | file | no | Uploaded voice audio (mutually exclusive with `voice_url`) |
 | `max_tokens` | int | no | Max tokens per chunk (default: `50`) |
 | `frames_after_eos` | int | no | Frames to generate after end-of-sentence |
+| `trim_start_ms` | int | no | Milliseconds to trim from the start of generated audio (default: `0`) |
+| `fade_in_ms` | int | no | Linear fade-in duration in milliseconds (default: `0`) |
+| `warmup_frames` | int | no | Initial Mimi frames to decode and discard for cleaner onset (default: `1`) |
 
 **Examples**
 

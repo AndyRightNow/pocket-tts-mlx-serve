@@ -117,7 +117,17 @@ def generation_worker(
         if item is None:
             break
 
-        response_queue, text, voice_kind, voice_value, max_tokens, frames_after_eos = item
+        (
+            response_queue,
+            text,
+            voice_kind,
+            voice_value,
+            max_tokens,
+            frames_after_eos,
+            trim_start_ms,
+            fade_in_ms,
+            warmup_frames,
+        ) = item
         try:
             if voice_kind == "url" and voice_cache is not None and voice_value in voice_cache:
                 model_state = voice_cache[voice_value]
@@ -166,12 +176,25 @@ def generation_worker(
             continue
 
         try:
-            audio_chunks = model.generate_audio_stream(
-                model_state=model_state,
-                text_to_generate=text,
-                max_tokens=max_tokens,
-                frames_after_eos=frames_after_eos,
-            )
+            if trim_start_ms or fade_in_ms:
+                audio = model.generate_audio(
+                    model_state=model_state,
+                    text_to_generate=text,
+                    max_tokens=max_tokens,
+                    frames_after_eos=frames_after_eos,
+                    trim_start_ms=trim_start_ms,
+                    fade_in_ms=fade_in_ms,
+                    warmup_frames=warmup_frames,
+                )
+                audio_chunks: Any = iter([audio])
+            else:
+                audio_chunks = model.generate_audio_stream(
+                    model_state=model_state,
+                    text_to_generate=text,
+                    max_tokens=max_tokens,
+                    frames_after_eos=frames_after_eos,
+                    warmup_frames=warmup_frames,
+                )
             stream_audio_chunks_to_queue(response_queue, audio_chunks, model.sample_rate)
         except Exception:
             logger.exception("TTS generation failed")
