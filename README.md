@@ -4,8 +4,8 @@ A thin [FastAPI](https://fastapi.tiangolo.com/) server layer for
 [pocket-tts-mlx](https://github.com/jishnuvenugopal/pocket-tts-mlx).
 
 It exposes the same `POST /tts` endpoint as `pocket-tts serve` from
-[pocket-tts](https://github.com/kyutai-labs/pocket-tts) but runs the MLX
-backend on Apple Silicon.
+[pocket-tts](https://github.com/kyutai-labs/pocket-tts) and supports the
+original MLX generation flags, while running the MLX backend on Apple Silicon.
 
 ## Requirements
 
@@ -98,6 +98,20 @@ Upload a voice file:
 curl -X POST http://localhost:8000/tts \
   -F "text=Hello from MLX!" \
   -F "voice_wav=@voice.wav" \
+  -o output.wav
+```
+
+Use the original MLX generation flags:
+
+```bash
+curl -X POST http://localhost:8000/tts \
+  -d "text=Hello from MLX!" \
+  -d "voice_url=https://huggingface.co/.../voice.wav" \
+  -d "max_tokens=100" \
+  -d "frames_after_eos=7" \
+  -d "trim_start_ms=100" \
+  -d "fade_in_ms=50" \
+  -d "warmup_frames=2" \
   -o output.wav
 ```
 
