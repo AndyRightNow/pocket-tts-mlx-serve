@@ -21,18 +21,16 @@ uv sync
 
 ## Run
 
-```bash
-# Using uv
-uv run pocket-tts-mlx-serve
-
-# Or after installing the package
-pocket-tts-mlx-serve
-```
-
-You can also run it directly as a tool with [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+The quickest way to run the server is with [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
 uvx --from git+https://github.com/AndyRightNow/pocket-tts-mlx-serve.git pocket-tts-mlx-serve --help
+```
+
+Or, after cloning the repository and installing dependencies with `uv sync`:
+
+```bash
+uv run pocket-tts-mlx-serve
 ```
 
 Options:
