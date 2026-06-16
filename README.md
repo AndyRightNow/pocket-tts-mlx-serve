@@ -29,6 +29,12 @@ uv run pocket-tts-mlx-serve
 pocket-tts-mlx-serve
 ```
 
+You can also run it directly as a tool with [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+
+```bash
+uvx --from git+https://github.com/AndyRightNow/pocket-tts-mlx-serve.git pocket-tts-mlx-serve --help
+```
+
 Options:
 
 ```bash
