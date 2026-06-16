@@ -13,12 +13,6 @@ backend on Apple Silicon.
 - Apple Silicon Mac (M1/M2/M3/M4)
 - [uv](https://docs.astral.sh/uv/)
 
-## Install
-
-```bash
-uv sync
-```
-
 ## Run
 
 The quickest way to run the server is with [`uvx`](https://docs.astral.sh/uv/guides/tools/):
@@ -27,13 +21,19 @@ The quickest way to run the server is with [`uvx`](https://docs.astral.sh/uv/gui
 uvx --from git+https://github.com/AndyRightNow/pocket-tts-mlx-serve.git pocket-tts-mlx-serve --help
 ```
 
-Or, after cloning the repository and installing dependencies with `uv sync`:
+### Run from source
+
+If you want to clone the repository and run locally:
 
 ```bash
+git clone https://github.com/AndyRightNow/pocket-tts-mlx-serve.git
+cd pocket-tts-mlx-serve
+uv sync
 uv run pocket-tts-mlx-serve
 ```
 
 Options:
+
 
 ```bash
 pocket-tts-mlx-serve \
