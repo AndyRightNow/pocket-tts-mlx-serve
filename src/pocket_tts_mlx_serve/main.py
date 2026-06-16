@@ -9,7 +9,6 @@ import logging
 import os
 import tempfile
 import threading
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Queue
@@ -20,89 +19,22 @@ from anyio.to_thread import run_sync
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pocket_tts_mlx import TTSModel
-from pocket_tts_mlx.default_parameters import DEFAULT_AUDIO_PROMPT
-from pocket_tts_mlx.utils.weight_conversion import PREDEFINED_VOICES
 from typing_extensions import Annotated
 
-from pocket_tts_mlx_serve.audio_streaming import stream_audio_chunks_to_queue
+from pocket_tts_mlx_serve.worker import _JobFailed, generation_worker, is_builtin_or_remote_voice
 
 logger = logging.getLogger(__name__)
 
 # Model configuration set by ``serve`` and consumed by the generation worker.
 _config: str | None = None
-# Default voice used when neither ``voice_url`` nor ``voice_wav`` is provided.
-default_voice: str = DEFAULT_AUDIO_PROMPT
+# Default voice URL used when neither ``voice_url`` nor ``voice_wav`` is provided.
+default_voice: str | None = None
 # Queue used to submit jobs to the dedicated MLX generation thread.
 _task_queue: Queue | None = None
-
-
-class _JobFailed:
-    """Marker placed on a response queue when a generation job fails."""
-
-    def __init__(self, message: str):
-        self.message = message
-
-
-def _is_builtin_or_remote_voice(voice_url: str) -> bool:
-    return (
-        voice_url.startswith("http://")
-        or voice_url.startswith("https://")
-        or voice_url.startswith("hf://")
-        or voice_url in PREDEFINED_VOICES
-    )
-
-
-def _generation_worker(ready_event: threading.Event) -> None:
-    """Dedicated thread that owns the MLX model and processes generation jobs."""
-    logger.info("Loading pocket-tts-mlx model in generation worker...")
-    model = TTSModel.load_model(config=_config) if _config else TTSModel.load_model()
-    logger.info("Model loaded in worker.")
-
-    # Small voice-state cache, matching the upstream serve behaviour.
-    voice_cache: OrderedDict[str, dict] = OrderedDict()
-    voice_cache_max_size = 2
-
-    ready_event.set()
-
-    assert _task_queue is not None
-
-    while True:
-        item = _task_queue.get()
-        if item is None:
-            break
-
-        response_queue, text, voice_kind, voice_value, max_tokens, frames_after_eos = item
-        try:
-            if voice_kind == "url":
-                if voice_value in voice_cache:
-                    model_state = voice_cache[voice_value]
-                    voice_cache.move_to_end(voice_value)
-                else:
-                    model_state = model.get_state_for_audio_prompt(voice_value)
-                    voice_cache[voice_value] = model_state
-                    if len(voice_cache) > voice_cache_max_size:
-                        voice_cache.popitem(last=False)
-            else:
-                model_state = model.get_state_for_audio_prompt(Path(voice_value), truncate=True)
-        except Exception as exc:
-            logger.exception("Failed to load voice state")
-            response_queue.put(_JobFailed(str(exc)))
-            response_queue.put(None)
-            continue
-
-        try:
-            audio_chunks = model.generate_audio_stream(
-                model_state=model_state,
-                text_to_generate=text,
-                max_tokens=max_tokens,
-                frames_after_eos=frames_after_eos,
-            )
-            stream_audio_chunks_to_queue(response_queue, audio_chunks, model.sample_rate)
-        except Exception:
-            logger.exception("TTS generation failed")
-        finally:
-            response_queue.put(None)
+# Whether to normalize voice prompts to a consistent peak level.
+_normalize_voice: bool = False
+# Maximum number of voice states to keep cached in the generation worker.
+_voice_cache_size: int = 2
 
 
 @asynccontextmanager
@@ -112,8 +44,8 @@ async def lifespan(app: FastAPI):
     _task_queue = Queue()
     ready_event = threading.Event()
     worker = threading.Thread(
-        target=_generation_worker,
-        args=(ready_event,),
+        target=generation_worker,
+        args=(ready_event, _config, _task_queue, _normalize_voice, _voice_cache_size),
         daemon=True,
         name="mlx-generation-worker",
     )
@@ -158,7 +90,7 @@ async def root() -> str:
   <li><code>GET /health</code> - health check</li>
   <li><a href="/docs">OpenAPI docs</a></li>
 </ul>
-<p>Default voice: <strong>{default_voice}</strong></p>
+<p>Default voice: <strong>{default_voice or "none (must be provided per request)"}</strong></p>
 </body>
 </html>
 """
@@ -236,24 +168,29 @@ def text_to_speech(
 
     Args:
         text: Text to convert to speech.
-        voice_url: Optional built-in voice name (e.g. ``alba``), or a remote URL
-            starting with ``http://``, ``https://``, or ``hf://``.
+        voice_url: Remote URL starting with ``http://``, ``https://``, or ``hf://``,
+            or a path to a ``.safetensors`` voice embedding.
         voice_wav: Optional uploaded voice file (mutually exclusive with ``voice_url``).
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     if voice_url is None and voice_wav is None:
+        if default_voice is None:
+            raise HTTPException(
+                status_code=400,
+                detail="voice_url or voice_wav is required",
+            )
         voice_url = default_voice
 
     if voice_url is not None and voice_wav is not None:
         raise HTTPException(status_code=400, detail="Cannot provide both voice_url and voice_wav")
 
     if voice_url is not None:
-        if not _is_builtin_or_remote_voice(voice_url):
+        if not is_builtin_or_remote_voice(voice_url):
             raise HTTPException(
                 status_code=400,
-                detail="voice_url must be a predefined voice or start with http://, https://, or hf://",
+                detail="voice_url must be a remote URL or a .safetensors path",
             )
         iterator = _submit_job(text, "url", voice_url, max_tokens, frames_after_eos)
         return _start_streaming_response(iterator)
@@ -282,9 +219,11 @@ def serve(
     reload: bool = False,
     config: str | None = None,
     default_voice_arg: str | None = None,
+    normalize_voice: bool = False,
+    voice_cache_size: int = 2,
 ) -> None:
     """Configure and start the FastAPI server."""
-    global _config, default_voice
+    global _config, default_voice, _normalize_voice, _voice_cache_size
 
     logging.basicConfig(
         level=logging.INFO,
@@ -292,6 +231,8 @@ def serve(
     )
 
     _config = config
+    _normalize_voice = normalize_voice
+    _voice_cache_size = voice_cache_size
     if default_voice_arg is not None:
         default_voice = default_voice_arg
 
@@ -322,8 +263,19 @@ def serve_cli() -> None:
     )
     parser.add_argument(
         "--default-voice",
-        default=DEFAULT_AUDIO_PROMPT,
-        help="Voice used when no voice_url/voice_wav is supplied",
+        default=None,
+        help="Default voice URL used when no voice_url/voice_wav is supplied",
+    )
+    parser.add_argument(
+        "--normalize-voice",
+        action="store_true",
+        help="Normalize voice prompts to a consistent peak level before cloning",
+    )
+    parser.add_argument(
+        "--voice-cache-size",
+        type=int,
+        default=2,
+        help="Number of voice states to cache (0 disables caching)",
     )
 
     args = parser.parse_args()
@@ -333,6 +285,8 @@ def serve_cli() -> None:
         reload=args.reload,
         config=args.config,
         default_voice_arg=args.default_voice,
+        normalize_voice=args.normalize_voice,
+        voice_cache_size=args.voice_cache_size,
     )
 
 
