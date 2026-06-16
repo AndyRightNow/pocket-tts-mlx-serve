@@ -88,3 +88,10 @@ Auto-format with:
 uv run ruff format .
 uv run ruff check . --fix
 ```
+
+### Pre-commit
+
+```bash
+uv run pre-commit install
+uv run pre-commit run --all-files
+```
