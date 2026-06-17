@@ -7,6 +7,7 @@ arrays and streams stay bound to the thread that loaded the model.
 import logging
 import threading
 from collections import OrderedDict
+from functools import lru_cache
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -60,13 +61,40 @@ def _state_from_audio(
     return model_state
 
 
-def _load_voice_embedding(url: str) -> mx.array:
-    """Load an ``audio_prompt`` embedding from a safetensors file."""
+def _state_from_voice_embedding(model: TTSModel, url: str) -> dict:
+    """Build a flow-lm state from a ``.safetensors`` voice file.
+
+    Supports two formats from ``kyutai/pocket-tts-without-voice-cloning``:
+
+    * ``embeddings/`` (v1): a single ``audio_prompt`` tensor; the FlowLM is
+      run to populate the KV cache.
+    * ``embeddings_v3/`` (v3): pre-computed KV caches and offsets
+      (``transformer.layers.N.self_attn/{cache,offset}``), loaded directly
+      without re-running the FlowLM.
+    """
     path = download_if_necessary(url)
-    weights = load_safetensors_to_mlx(path, key_filter="audio_prompt")
-    if "audio_prompt" not in weights:
-        raise KeyError(f"'audio_prompt' not found in voice embedding {url}")
-    return weights["audio_prompt"]
+    weights = load_safetensors_to_mlx(path)
+
+    if "audio_prompt" in weights:
+        embedding = weights["audio_prompt"]
+        model_state = init_states(model.flow_lm, batch_size=1, sequence_length=embedding.shape[1])
+        model._run_flow_lm_and_increment_step(model_state=model_state, audio_conditioning=embedding)
+        return model_state
+
+    # v3: pre-computed KV caches keyed as "transformer.layers.N.self_attn/{cache,offset}".
+    seq_len = next((v.shape[2] for k, v in weights.items() if k.endswith("/cache")), None)
+    if seq_len is None:
+        raise KeyError(
+            f"Neither 'audio_prompt' nor 'transformer.layers.*.self_attn/cache' found in {url}"
+        )
+    model_state = init_states(model.flow_lm, batch_size=1, sequence_length=seq_len)
+    for key, val in weights.items():
+        module_path, _, state_key = key.partition("/")
+        if state_key == "cache":
+            model_state[module_path]["cache"] = val
+        elif state_key == "offset":
+            model_state[module_path]["current_end"] = mx.zeros((int(val.item()),), dtype=mx.int64)
+    return model_state
 
 
 class _JobFailed:
@@ -76,10 +104,43 @@ class _JobFailed:
         self.message = message
 
 
+def _is_voice_name(value: str) -> bool:
+    """Return ``True`` if ``value`` is a bare voice name (not a URL or file path)."""
+    return (
+        not value.startswith(("http://", "https://", "hf://"))
+        and "/" not in value
+        and "\\" not in value
+        and "." not in value
+    )
+
+
+@lru_cache(maxsize=64)
+def _resolve_voice_name(name: str) -> str:
+    """Resolve a bare voice name to a v3 (preferred) or v1 embedding URL.
+
+    Raises ``ValueError`` if the voice exists in neither ``embeddings_v3`` nor
+    ``embeddings``.
+    """
+    base = "hf://kyutai/pocket-tts-without-voice-cloning"
+    for folder in ("embeddings_v3", "embeddings"):
+        url = f"{base}/{folder}/{name}.safetensors"
+        try:
+            download_if_necessary(url)
+            return url
+        except Exception:
+            logger.debug("'%s' not found in %s, trying next folder", name, folder)
+    raise ValueError(
+        f"Voice '{name}' not found in embeddings_v3 or embeddings. "
+        "Provide a voice_url pointing to a .safetensors file or .wav audio instead."
+    )
+
+
 def is_builtin_or_remote_voice(voice_url: str) -> bool:
     """Return ``True`` if ``voice_url`` can be handled without uploading a file."""
-    return voice_url.startswith(("http://", "https://", "hf://")) or voice_url.endswith(
-        ".safetensors"
+    return (
+        voice_url.startswith(("http://", "https://", "hf://"))
+        or voice_url.endswith(".safetensors")
+        or _is_voice_name(voice_url)
     )
 
 
@@ -129,21 +190,14 @@ def generation_worker(
             warmup_frames,
         ) = item
         try:
+            if _is_voice_name(voice_value):
+                voice_value = _resolve_voice_name(voice_value)
             if voice_kind == "url" and voice_cache is not None and voice_value in voice_cache:
                 model_state = voice_cache[voice_value]
                 voice_cache.move_to_end(voice_value)
             else:
                 if voice_value.endswith(".safetensors"):
-                    embedding = _load_voice_embedding(voice_value)
-                    model_state = init_states(
-                        model.flow_lm,
-                        batch_size=1,
-                        sequence_length=embedding.shape[1],
-                    )
-                    model._run_flow_lm_and_increment_step(
-                        model_state=model_state,
-                        audio_conditioning=embedding,
-                    )
+                    model_state = _state_from_voice_embedding(model, voice_value)
                 elif voice_kind == "url":
                     # Generic audio URL: download and clone the voice.
                     audio_path = download_if_necessary(voice_value)
@@ -200,20 +254,3 @@ def generation_worker(
             logger.exception("TTS generation failed")
         finally:
             response_queue.put(None)
-
-
-def iter_response_queue(response_queue: Queue) -> Any:
-    """Yield WAV bytes from a response queue, raising on job failure."""
-    first_item = response_queue.get()
-    if isinstance(first_item, _JobFailed):
-        # Drain the terminating None so the queue does not leak.
-        response_queue.get()
-        raise RuntimeError(first_item.message)
-    if first_item is not None:
-        yield first_item
-
-    while True:
-        data = response_queue.get()
-        if data is None:
-            break
-        yield data
